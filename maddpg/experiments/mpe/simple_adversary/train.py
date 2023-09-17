@@ -54,14 +54,14 @@ if __name__ == "__main__":
     critic_lr = 1e-2
     gamma = 0.95
     tau = 1e-2
-    batch_size = 1024
+    batch_size = 128
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     update_interval = 100
 
     env = simple_adversary_v3.parallel_env()
     observations, info = env.reset()
 
-    agents = env.agents
+    agents = [agent_id for agent_id in env.agents]
 
     replay_buffer = ReplayBuffer(buffer_size, device=device)
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
                 
                 agent_rewards = dict()
                 for i_step in range(episode_length):
-                    if len(env.agents) == 0:
+                    if not env.agents:
                         break
 
                     actions = maddpg.take_action(env, state, explore=True)
@@ -110,7 +110,7 @@ if __name__ == "__main__":
                             for agent_id in env.agents
                         }
                     else:
-                        done = {agent_id: True for agent_id in agents}
+                        {agent_id: True for agent_id in agents}
 
                     replay_buffer.add(Transition(
                         state, actions, reward, next_state, done))
@@ -136,5 +136,3 @@ if __name__ == "__main__":
                 pbar.update(1)
             
         env.close()
-
-        # plot_result()

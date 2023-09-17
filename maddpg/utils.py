@@ -1,34 +1,34 @@
 import torch
 import torch.nn.functional as F
-from torch.autograd import Variable
 import numpy as np
 
 
-def onehot_from_logits(logits, eps=0.0):
+def onehot_from_logits(logits, eps=0.01, device='cpu'):
     """
     Given batch of logits, return one-hot sample using epsilon greedy strategy
     (based on given epsilon)
     """
     # get best (according to current policy) actions in one-hot form
-    argmax_acs = (logits == logits.max(1, keepdim=True)[0]).float()
-    if eps == 0.0:
-        return argmax_acs
+    argmax_acs = (logits == logits.max(1, keepdim=True)[0]).float().to(device=device)
 
     # get random actions in one-hot form
-    rand_acs = Variable(
+    rand_acs = torch.tensor(
         torch.eye(logits.shape[1])[
-            [np.random.choice(range(logits.shape[1]), size=logits.shape[0])],
+                [np.random.choice(range(logits.shape[1]), size=logits.shape[0])],
         ],
-        requires_grad=False)
+        requires_grad=False
+    ).squeeze().to(device=device)
 
     # chooses between best and random actions using epsilon greedy
-    return torch.stack([argmax_acs[i] if r > eps else rand_acs[i]
-                        for i, r in enumerate(torch.rand(logits.shape[0]))])
+    return torch.stack(
+        [argmax_acs[i] if r > eps else rand_acs[i]
+         for i, r in enumerate(torch.rand(logits.shape[0]))]
+    )
 
 
 def sample_gumbel(shape, eps=1e-20, tens_type=torch.FloatTensor, device='cpu'):
     """Sample from Gumbel(0, 1)"""
-    U = Variable(tens_type(*shape).uniform_(),
+    U = torch.tensor(tens_type(*shape).uniform_(),
                  requires_grad=False).to(device=device)
     return -torch.log(-torch.log(U + eps) + eps)
 
@@ -46,7 +46,7 @@ def gumbel_softmax(logits, temperature=1.0, hard=False, device='cpu'):
     """
     y = gumbel_softmax_sample(logits, temperature, device=device)
     if hard:
-        y_hard = onehot_from_logits(y)
+        y_hard = onehot_from_logits(y, device=device)
         y = (y_hard - y).detach() + y
     return y
 

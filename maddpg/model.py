@@ -97,20 +97,20 @@ class Agent:
     def select_action(self, state, explore=False):
         action = self.actor(state)
         if explore:
-            action =  gumbel_softmax(action, device=self.device)
+            action =  gumbel_softmax(action, device=self.device, hard=True)
         else:
-            action = onehot_from_logits(action)
-        return action.detach()
+            action = onehot_from_logits(action, device=self.device)
+        return action
 
     def soft_update(self, tau):
         self.__sort_update(self.actor, self.target_actor, tau)
         self.__sort_update(self.critic, self.target_critic, tau)
 
-    def __sort_update(self, policy_net, target_net, tau):
-        policy_net_state_dict = policy_net.state_dict()
+    def __sort_update(self, net, target_net, tau):
+        net_state_dict = net.state_dict()
         target_net_state_dict = target_net.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key] * \
+        for key in net_state_dict:
+            target_net_state_dict[key] = net_state_dict[key] * \
                 tau + target_net_state_dict[key]*(1-tau)
         target_net.load_state_dict(target_net_state_dict)
 
@@ -180,7 +180,7 @@ class MADDPG:
 
         # calculate target values
         all_target_act = [
-            onehot_from_logits(target_act(next_observations[agent_id])).to()
+            onehot_from_logits(target_act(next_observations[agent_id]), device=self.device)
             for agent_id, target_act in self.target_actors.items()
         ]
         all_next_observations = torch.cat(
@@ -188,10 +188,7 @@ class MADDPG:
         )
         target_input = torch.cat(
             (all_next_observations, *all_target_act), dim=1)
-        target_values = rewards[agent_id] + \
-            self.gamma * \
-            cur_agent.target_critic(target_input) * \
-            (1 - dones[agent_id])
+        target_values = rewards[agent_id].view(-1, 1) + self.gamma * cur_agent.target_critic(target_input) * (1 - dones[agent_id].view(-1, 1))
 
         # calculate values
         all_observations = torch.cat(
@@ -200,7 +197,7 @@ class MADDPG:
         all_actions = torch.cat(
             ([action for action in actions.values()]), dim=1
         )
-        input = torch.cat((all_observations, *all_actions), dim=1)
+        input = torch.cat((all_observations, all_actions), dim=1)
         values = cur_agent.critic(input)
 
         # calculate loss
@@ -220,15 +217,15 @@ class MADDPG:
         # Forward pass as if onehot (hard=True) but back-prop through a differentiable
         # Gumbel-Softmax sample.
         cur_actor_out = cur_agent.actor(observations[cur_agent_id])
+        cur_act_vf_in = gumbel_softmax(cur_actor_out, device=self.device, hard=True)
+        
         all_actor_acs = []
         for agent_id, actor in self.actors.items():
             if agent_id == cur_agent_id:
-                cur_act_vf_in = gumbel_softmax(
-                    cur_actor_out, device=self.device)
                 all_actor_acs.append(cur_act_vf_in)
             else:
-                all_actor_acs.append(onehot_from_logits(
-                    actor(observations[agent_id])))
+                all_actor_acs.append(
+                    onehot_from_logits(actor(observations[agent_id]), device=self.device))
 
         all_observations = torch.cat(
             ([obs for obs in observations.values()]), dim=1
@@ -243,5 +240,4 @@ class MADDPG:
 
     def update_all_targets(self):
         for agt in self.agents.values():
-            agt.soft_update(self.tau)
             agt.soft_update(self.tau)
