@@ -47,7 +47,7 @@ def evaluate(maddpg, n_episode=10, episode_length=25):
 
 if __name__ == "__main__":
     num_episodes = 5000
-    episode_length = 25  # 每条序列的最大长度
+    episode_length = 50  # 每条序列的最大长度
     buffer_size = 10000
     hidden_dim = 64
     actor_lr = 1e-2
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     update_interval = 100
 
-    env = simple_adversary_v3.parallel_env()
+    env = simple_adversary_v3.parallel_env(max_cycles=episode_length)
     observations, info = env.reset()
 
     agents = [agent_id for agent_id in env.agents]
@@ -110,16 +110,21 @@ if __name__ == "__main__":
                             for agent_id in env.agents
                         }
                     else:
-                        {agent_id: True for agent_id in agents}
+                        done = {agent_id: True for agent_id in agents}
 
                     replay_buffer.add(Transition(
                         state, actions, reward, next_state, done))
                     state = next_state
+                    
+                    if all(done.values()):
+                        break
 
                     total_steps += 1
                     if replay_buffer.size() >= batch_size and total_steps % update_interval == 0:
                         sample = replay_buffer.sample(batch_size, env.agents)
                         for agent_id in env.agents:
+                            if agent_id == "adversary_0":
+                                continue
                             maddpg.optimize(sample, agent_id)
                         maddpg.update_all_targets()
 

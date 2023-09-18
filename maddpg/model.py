@@ -124,7 +124,6 @@ class MADDPG:
                                           hidden_dim, actor_lr, critic_lr, device)
         self.gamma = gamma
         self.tau = tau
-        self.critic_criterion = torch.nn.MSELoss()
         self.device = device
         self.env = env
 
@@ -201,8 +200,7 @@ class MADDPG:
         values = cur_agent.critic(input)
 
         # calculate loss
-        loss = self.critic_criterion(values,
-                                     target_values.detach())
+        loss = nn.MSELoss()(values, target_values.detach())
 
         # optimize parameters
         loss.backward()
