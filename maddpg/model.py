@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 
-from maddpg.utils import onehot_from_logits, sample_gumbel, gumbel_softmax, gumbel_softmax_sample
+from maddpg.utils import onehot_from_logits, gumbel_softmax
 
 
 class Net(nn.Module):
@@ -51,20 +51,12 @@ class ReplayBuffer:
 
         return agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones
 
-    def __to_tensor(self, x):
-        if isinstance(x, float) or isinstance(x, int) or isinstance(x, bool):
-            return torch.tensor([x], dtype=torch.float).to(device=self.device)
-        return torch.tensor(x, dtype=torch.float).to(device=self.device)
-
-    def __to_array(self, tuples, agents, batch_size):
-        tuple_array = np.array(tuples)
+    def __to_array(self, batch, agents, batch_size):
+        batch_array = np.array(batch)
         agent_array = {
-            agent_id: torch.stack(
-                [self.__to_tensor(tuple_array[i][agent_id])
-                 for i in range(len(tuple_array))],
-                dim=1
-            ).view(batch_size, -1)
-            for agent_id in agents
+            agent_id: np.array(
+                [batch_array[i][agent_id] for i in range(len(batch_array))], dtype=float
+            ) for agent_id in agents
         }
         return agent_array
 
@@ -89,10 +81,10 @@ class Agent:
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.target_actor.load_state_dict(self.actor.state_dict())
 
-        self.actor_optimizer = optim.AdamW(self.actor.parameters(),
-                                           lr=actor_lr)
-        self.critic_optimizer = optim.AdamW(self.critic.parameters(),
-                                            lr=critic_lr)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(),
+                                          lr=actor_lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(),
+                                           lr=critic_lr)
 
         self.device = device
 
@@ -102,32 +94,29 @@ class Agent:
             action = gumbel_softmax(action, device=self.device)
         else:
             action = onehot_from_logits(action, device=self.device)
-        return action
+        return action.detach().cpu().numpy()[0]
 
     def soft_update(self, tau):
         self.__sort_update(self.actor, self.target_actor, tau)
         self.__sort_update(self.critic, self.target_critic, tau)
 
     def __sort_update(self, net, target_net, tau):
-        net_state_dict = net.state_dict()
-        target_net_state_dict = target_net.state_dict()
-        for key in net_state_dict:
-            target_net_state_dict[key] = net_state_dict[key] * \
-                tau + target_net_state_dict[key]*(1-tau)
-        target_net.load_state_dict(target_net_state_dict)
+        for target_param, source_param in zip(target_net.parameters(), net.parameters()):
+            target_param.data.copy_(
+                tau * source_param.data + (1 - tau) * target_param.data)
 
 
 class MADDPG:
 
-    def __init__(self, 
+    def __init__(self,
                  env, device, state_dims, action_dims,
-                 actor_lr=1e-2, 
-                 critic_lr=1e-2, 
+                 actor_lr=1e-2,
+                 critic_lr=1e-2,
                  hidden_dim=64,
-                 gamma=0.95, 
+                 gamma=0.95,
                  tau=1e-2):
         critic_input_dim = sum(state_dims.values()) + sum(action_dims.values())
-        
+
         self.agents = dict()
         for agent_id in env.agents:
             self.agents[agent_id] = Agent(state_dims[agent_id], action_dims[agent_id], critic_input_dim,
@@ -189,27 +178,35 @@ class MADDPG:
         cur_agent.critic_optimizer.zero_grad()
 
         # calculate target values
-        all_next_actions = [
-            onehot_from_logits(target_act(
-                next_observations[agent_id]), device=self.device)
+        all_target_actions = [
+            onehot_from_logits(
+                target_act(
+                    torch.tensor(
+                        next_observations[agent_id], dtype=torch.float, device=self.device)
+                ),
+                device=self.device)
             for agent_id, target_act in self.target_actors.items()
         ]
-        all_next_observations = torch.cat(
-            ([next_observations[agent_id] for agent_id in self.agents]), dim=1
-        )
+        all_target_observations = [
+            torch.tensor(next_observations[agent_id], dtype=torch.float, device=self.device)
+            for agent_id in self.agents
+        ]
         target_input = torch.cat(
-            (all_next_observations, *all_next_actions), dim=1)
-        target_values = rewards[agent_id].view(-1, 1) + self.gamma * cur_agent.target_critic(
-            target_input) * (1 - dones[agent_id].view(-1, 1))
+            (*all_target_observations, *all_target_actions), dim=1)
+        target_values = rewards[agent_id] + self.gamma * \
+            cur_agent.target_critic(target_input) * \
+            (1 - dones[agent_id].view(-1, 1))
 
         # calculate values
-        all_observations = torch.cat(
-            ([observations[agent_id] for agent_id in self.agents]), dim=1
-        )
-        all_actions = torch.cat(
-            ([actions[agent_id] for agent_id in self.agents]), dim=1
-        )
-        input = torch.cat((all_observations, all_actions), dim=1)
+        all_observations = [
+            observations[agent_id] for agent_id in self.agents
+        ]
+        all_actions = [
+            actions[agent_id] for agent_id in self.agents
+        ]
+        input = torch.cat(
+            (*all_observations, *all_actions),
+            dim=1)
         values = cur_agent.critic(input)
 
         # calculate loss
@@ -217,38 +214,39 @@ class MADDPG:
 
         # optimize parameters
         loss.backward()
-        nn.utils.clip_grad_norm_(cur_agent.critic.parameters(), 1)
+        # nn.utils.clip_grad_norm_(cur_agent.critic.parameters(), 1)
         cur_agent.critic_optimizer.step()
 
     def __optimize_actor(self, observations, cur_agent_id):
         cur_agent = self.agents[cur_agent_id]
 
-        # clear gradients
         cur_agent.actor_optimizer.zero_grad()
 
-        # Forward pass as if onehot (hard=True) but back-prop through a differentiable
-        # Gumbel-Softmax sample.
-        cur_actor_out = cur_agent.actor(observations[cur_agent_id])
-        cur_act_vf_in = gumbel_softmax(cur_actor_out, device=self.device)
+        logits = self.agents[cur_agent_id].actor(torch.tensor(
+            observations[cur_agent_id], dtype=torch.float, device=self.device))
+        cur_agent_action = gumbel_softmax(logits, device=self.device)
 
-        all_actor_acs = []
-        for agent_id, actor in self.actors.items():
+        cur_agent_actions = []
+        for agent_id in self.agents:
             if agent_id == cur_agent_id:
-                all_actor_acs.append(cur_act_vf_in)
+                cur_agent_actions.append(cur_agent_action)
             else:
-                all_actor_acs.append(
-                    onehot_from_logits(actor(observations[agent_id]), device=self.device))
+                cur_agent_actions.append(
+                    onehot_from_logits(self.agents[agent_id].actor(observations[agent_id]),
+                                       device=self.device))
 
-        all_observations = torch.cat(
-            ([obs for obs in observations.values()]), dim=1
-        )
-        vf_in = torch.cat((all_observations, *all_actor_acs), dim=1)
+        cur_agent_observations = [
+            observations[agent_id]
+            for agent_id in self.agents
+        ]
+        critic_input = torch.cat(
+            (*cur_agent_observations, *cur_agent_actions), dim=1)
 
-        loss = (cur_actor_out**2).mean() * 1e-3 - \
-            cur_agent.critic(vf_in).mean()
+        loss = -cur_agent.critic(critic_input).mean()
+        loss += (logits ** 2).mean() * 1e-3
 
         loss.backward()
-        nn.utils.clip_grad_norm_(cur_agent.actor.parameters(), 1)
+        # nn.utils.clip_grad_norm_(cur_agent.actor.parameters(), 1)
         cur_agent.actor_optimizer.step()
 
     def update_all_targets(self):
@@ -264,4 +262,5 @@ class MADDPG:
 
     def load(self):
         for file in glob.glob(os.path.join('model', '*.pth')):
-            self.agents[file.removeprefix('model/').removesuffix('.pth')].actor.load_state_dict(torch.load(file))
+            self.agents[file.removeprefix(
+                'model/').removesuffix('.pth')].actor.load_state_dict(torch.load(file))

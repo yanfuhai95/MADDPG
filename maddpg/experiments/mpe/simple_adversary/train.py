@@ -61,19 +61,22 @@ def plot_result(return_list):
 
 
 if __name__ == "__main__":
-    num_episodes = 1000
-    episode_length = 25  # 每条序列的最大长度
-    buffer_size = 10000
+    num_episodes = 5000
+    episode_length = 25
+    buffer_size = 100000
     hidden_dim = 64
     actor_lr = 1e-2
     critic_lr = 1e-2
     gamma = 0.95
     tau = 1e-2
-    batch_size = 128
+    batch_size = 1024
+    # batch_size = 5
+    # minimal_size = 10
+    minimal_size = 4000
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     update_interval = 100
 
-    env = simple_adversary_v3.parallel_env(max_cycles=episode_length)
+    env = simple_adversary_v3.parallel_env(max_cycles=episode_length+1)
     observations, info = env.reset()
 
     agents = [agent_id for agent_id in env.agents]
@@ -108,7 +111,7 @@ if __name__ == "__main__":
 
                     actions = maddpg.take_action(env, state, explore=True)
                     step_actions = {
-                        agent_id: action.argmax(dim=1).item()
+                        agent_id: action.argmax()
                         for agent_id, action in actions.items()
                     }
                     next_state, reward, terminated, truncated, _ = env.step(
@@ -123,7 +126,7 @@ if __name__ == "__main__":
                         done = {
                             agent_id: True if agent_id not in terminated and agent_id not in truncated
                             else terminated[agent_id] or truncated[agent_id]
-                            for agent_id in env.agents
+                            for agent_id in agents
                         }
                     else:
                         done = {agent_id: True for agent_id in agents}
@@ -132,13 +135,10 @@ if __name__ == "__main__":
                         state, actions, reward, next_state, done))
                     state = next_state
 
-                    if all(done.values()):
-                        break
-
                     total_steps += 1
-                    if replay_buffer.size() >= batch_size and total_steps % update_interval == 0:
+                    if replay_buffer.size() >= minimal_size and total_steps % update_interval == 0:
                         sample = replay_buffer.sample(batch_size, env.agents)
-                        for agent_id in env.agents:
+                        for agent_id in agents:
                             maddpg.optimize(sample, agent_id)
                         maddpg.update_all_targets()
 
@@ -149,8 +149,7 @@ if __name__ == "__main__":
                     }
 
                     for agent_id, rewards in agent_rewards.items():
-                        postfix['reward_%s ' %
-                                agent_id] = np.mean(rewards[-10:])
+                        postfix[agent_id] = np.mean(rewards[-10:])
                     pbar.set_postfix(postfix)
 
                 pbar.update(1)

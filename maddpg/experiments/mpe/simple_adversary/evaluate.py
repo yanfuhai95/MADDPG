@@ -1,4 +1,5 @@
 import math
+import time
 
 import torch
 from pettingzoo.mpe import simple_adversary_v3
@@ -6,11 +7,11 @@ from pettingzoo.mpe import simple_adversary_v3
 from maddpg.model import MADDPG
 
 if __name__ == "__main__":
-    episode_length=100000
+    times = 10000
     hidden_dim = 64
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = simple_adversary_v3.parallel_env(max_cycles=episode_length, render_mode='human')
+    env = simple_adversary_v3.parallel_env(max_cycles=25, render_mode='human')
     state, info = env.reset()
 
     agents = [agent_id for agent_id in env.agents]
@@ -25,14 +26,24 @@ if __name__ == "__main__":
     maddpg = MADDPG(env, device, state_dims, action_dims)
     maddpg.load()
 
-    while env.agents:
-        actions = maddpg.take_action(env, state, explore=True)
-        step_actions = {
-            agent_id: action.argmax(dim=1).item()
-            for agent_id, action in actions.items()
-        }
-        state, rewards, terminations, truncations, infos = env.step(step_actions)
-        if all(terminations.values()) or all(truncations.values()):
-            break
+    for i in range(times):
+        state, info = env.reset()
         
+        while env.agents:
+            print("State:", state)
+        
+            actions = maddpg.take_action(env, state)
+            step_actions = {
+                agent_id: action.argmax(dim=1).item()
+                for agent_id, action in actions.items()
+            }
+            state, rewards, terminations, truncations, infos = env.step(step_actions)
+            print("Rewards:", rewards)
+            print("Action:", actions)
+            
+            if all(terminations.values()) or all(truncations.values()):
+                break
+            
+            time.sleep(1)
+
     env.close()
