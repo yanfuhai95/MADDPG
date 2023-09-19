@@ -1,3 +1,5 @@
+import os
+import glob
 import random
 from collections import namedtuple, deque
 
@@ -97,7 +99,7 @@ class Agent:
     def select_action(self, state, explore=False):
         action = self.actor(state)
         if explore:
-            action =  gumbel_softmax(action, device=self.device, hard=True)
+            action = gumbel_softmax(action, device=self.device)
         else:
             action = onehot_from_logits(action, device=self.device)
         return action
@@ -116,8 +118,16 @@ class Agent:
 
 
 class MADDPG:
-    def __init__(self, env, device, actor_lr, critic_lr, hidden_dim,
-                 state_dims, action_dims, critic_input_dim, gamma, tau):
+
+    def __init__(self, 
+                 env, device, state_dims, action_dims,
+                 actor_lr=1e-2, 
+                 critic_lr=1e-2, 
+                 hidden_dim=64,
+                 gamma=0.95, 
+                 tau=1e-2):
+        critic_input_dim = sum(state_dims.values()) + sum(action_dims.values())
+        
         self.agents = dict()
         for agent_id in env.agents:
             self.agents[agent_id] = Agent(state_dims[agent_id], action_dims[agent_id], critic_input_dim,
@@ -147,7 +157,7 @@ class MADDPG:
             return t.flatten()
         return t
 
-    def take_action(self, env, states, explore):
+    def take_action(self, env, states, explore=False):
         observations = {
             agent_id: torch.stack(
                 [self.__flatten_as_need(torch.tensor(
@@ -157,7 +167,8 @@ class MADDPG:
         }
 
         return {
-            agent_id: agent.select_action(observations[agent_id], explore)
+            agent_id: agent.select_action(
+                observations[agent_id], explore=explore)
             for agent_id, agent in self.agents.items()
         }
 
@@ -178,23 +189,25 @@ class MADDPG:
         cur_agent.critic_optimizer.zero_grad()
 
         # calculate target values
-        all_target_act = [
-            onehot_from_logits(target_act(next_observations[agent_id]), device=self.device)
+        all_next_actions = [
+            onehot_from_logits(target_act(
+                next_observations[agent_id]), device=self.device)
             for agent_id, target_act in self.target_actors.items()
         ]
         all_next_observations = torch.cat(
-            ([obs for obs in next_observations.values()]), dim=1
+            ([next_observations[agent_id] for agent_id in self.agents]), dim=1
         )
         target_input = torch.cat(
-            (all_next_observations, *all_target_act), dim=1)
-        target_values = rewards[agent_id].view(-1, 1) + self.gamma * cur_agent.target_critic(target_input) * (1 - dones[agent_id].view(-1, 1))
+            (all_next_observations, *all_next_actions), dim=1)
+        target_values = rewards[agent_id].view(-1, 1) + self.gamma * cur_agent.target_critic(
+            target_input) * (1 - dones[agent_id].view(-1, 1))
 
         # calculate values
         all_observations = torch.cat(
-            ([obs for obs in observations.values()]), dim=1
+            ([observations[agent_id] for agent_id in self.agents]), dim=1
         )
         all_actions = torch.cat(
-            ([action for action in actions.values()]), dim=1
+            ([actions[agent_id] for agent_id in self.agents]), dim=1
         )
         input = torch.cat((all_observations, all_actions), dim=1)
         values = cur_agent.critic(input)
@@ -204,6 +217,7 @@ class MADDPG:
 
         # optimize parameters
         loss.backward()
+        nn.utils.clip_grad_norm_(cur_agent.critic.parameters(), 1)
         cur_agent.critic_optimizer.step()
 
     def __optimize_actor(self, observations, cur_agent_id):
@@ -215,8 +229,8 @@ class MADDPG:
         # Forward pass as if onehot (hard=True) but back-prop through a differentiable
         # Gumbel-Softmax sample.
         cur_actor_out = cur_agent.actor(observations[cur_agent_id])
-        cur_act_vf_in = gumbel_softmax(cur_actor_out, device=self.device, hard=True)
-        
+        cur_act_vf_in = gumbel_softmax(cur_actor_out, device=self.device)
+
         all_actor_acs = []
         for agent_id, actor in self.actors.items():
             if agent_id == cur_agent_id:
@@ -230,12 +244,24 @@ class MADDPG:
         )
         vf_in = torch.cat((all_observations, *all_actor_acs), dim=1)
 
-        loss = -cur_agent.critic(vf_in).mean()
-        loss += (cur_actor_out**2).mean() * 1e-3
+        loss = (cur_actor_out**2).mean() * 1e-3 - \
+            cur_agent.critic(vf_in).mean()
 
         loss.backward()
+        nn.utils.clip_grad_norm_(cur_agent.actor.parameters(), 1)
         cur_agent.actor_optimizer.step()
 
     def update_all_targets(self):
         for agt in self.agents.values():
             agt.soft_update(self.tau)
+
+    def save(self):
+        if not os.path.exists('model'):
+            os.makedirs('model')
+
+        for agent_id, actor in self.actors.items():
+            torch.save(actor.state_dict(), 'model/%s.pth' % agent_id)
+
+    def load(self):
+        for file in glob.glob(os.path.join('model', '*.pth')):
+            self.agents[file.removeprefix('model/').removesuffix('.pth')].actor.load_state_dict(torch.load(file))

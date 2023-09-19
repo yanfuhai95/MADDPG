@@ -10,20 +10,20 @@ def onehot_from_logits(logits, eps=0.01, device='cpu'):
     """
     # get best (according to current policy) actions in one-hot form
     argmax_acs = (logits == logits.max(1, keepdim=True)[0]).float().to(device=device)
+    return argmax_acs
+    # # get random actions in one-hot form
+    # eye = torch.eye(logits.shape[1])
+    # rand_choice = eye[
+    #             [np.random.choice(range(logits.shape[1]), size=logits.shape[0])],
+    #     ]
+    # rand_acs = torch.tensor(rand_choice, requires_grad=False
+    # ).to(device=device)
 
-    # get random actions in one-hot form
-    rand_acs = torch.tensor(
-        torch.eye(logits.shape[1])[
-                [np.random.choice(range(logits.shape[1]), size=logits.shape[0])],
-        ],
-        requires_grad=False
-    ).squeeze().to(device=device)
-
-    # chooses between best and random actions using epsilon greedy
-    return torch.stack(
-        [argmax_acs[i] if r > eps else rand_acs[i]
-         for i, r in enumerate(torch.rand(logits.shape[0]))]
-    )
+    # # chooses between best and random actions using epsilon greedy
+    # return torch.stack(
+    #     [argmax_acs[i] if r > eps else rand_acs[i]
+    #      for i, r in enumerate(torch.rand(logits.shape[0]))]
+    # )
 
 
 def sample_gumbel(shape, eps=1e-20, tens_type=torch.FloatTensor, device='cpu'):
@@ -33,7 +33,7 @@ def sample_gumbel(shape, eps=1e-20, tens_type=torch.FloatTensor, device='cpu'):
     return -torch.log(-torch.log(U + eps) + eps)
 
 
-def gumbel_softmax(logits, temperature=1.0, hard=False, device='cpu'):
+def gumbel_softmax(logits, temperature=1.0, device='cpu'):
     """Sample from the Gumbel-Softmax distribution and optionally discretize.
     Args:
       logits: [batch_size, n_class] unnormalized log-probs
@@ -45,9 +45,8 @@ def gumbel_softmax(logits, temperature=1.0, hard=False, device='cpu'):
       be a probabilitiy distribution that sums to 1 across classes
     """
     y = gumbel_softmax_sample(logits, temperature, device=device)
-    if hard:
-        y_hard = onehot_from_logits(y, device=device)
-        y = (y_hard - y).detach() + y
+    y_hard = onehot_from_logits(y, device=device)
+    y = (y_hard - y).detach() + y
     return y
 
 
