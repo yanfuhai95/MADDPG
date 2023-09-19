@@ -51,12 +51,20 @@ class ReplayBuffer:
 
         return agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones
 
-    def __to_array(self, batch, agents, batch_size):
-        batch_array = np.array(batch)
+    def __to_tensor(self, x):
+        if isinstance(x, float) or isinstance(x, int) or isinstance(x, bool):
+            return torch.tensor([x], dtype=torch.float, requires_grad=False).to(device=self.device)
+        return torch.tensor(x, dtype=torch.float, requires_grad=False).to(device=self.device)
+
+    def __to_array(self, tuples, agents, batch_size):
+        tuple_array = np.array(tuples)
         agent_array = {
-            agent_id: np.array(
-                [batch_array[i][agent_id] for i in range(len(batch_array))], dtype=float
-            ) for agent_id in agents
+            agent_id: torch.stack(
+                [self.__to_tensor(tuple_array[i][agent_id])
+                 for i in range(len(tuple_array))],
+                dim=1
+            ).view(batch_size, -1)
+            for agent_id in agents
         }
         return agent_array
 
@@ -89,12 +97,12 @@ class Agent:
         self.device = device
 
     def select_action(self, state, explore=False):
-        action = self.actor(state)
+        action = self.actor(state).detach()
         if explore:
             action = gumbel_softmax(action, device=self.device)
         else:
             action = onehot_from_logits(action, device=self.device)
-        return action.detach().cpu().numpy()[0]
+        return action
 
     def soft_update(self, tau):
         self.__sort_update(self.actor, self.target_actor, tau)
@@ -179,21 +187,16 @@ class MADDPG:
 
         # calculate target values
         all_target_actions = [
-            onehot_from_logits(
-                target_act(
-                    torch.tensor(
-                        next_observations[agent_id], dtype=torch.float, device=self.device)
-                ),
-                device=self.device)
+            onehot_from_logits(target_act(
+                next_observations[agent_id]), device=self.device)
             for agent_id, target_act in self.target_actors.items()
         ]
         all_target_observations = [
-            torch.tensor(next_observations[agent_id], dtype=torch.float, device=self.device)
-            for agent_id in self.agents
+            next_observations[agent_id] for agent_id in self.agents
         ]
         target_input = torch.cat(
             (*all_target_observations, *all_target_actions), dim=1)
-        target_values = rewards[agent_id] + self.gamma * \
+        target_values = rewards[agent_id].view(-1, 1) + self.gamma * \
             cur_agent.target_critic(target_input) * \
             (1 - dones[agent_id].view(-1, 1))
 
@@ -204,9 +207,7 @@ class MADDPG:
         all_actions = [
             actions[agent_id] for agent_id in self.agents
         ]
-        input = torch.cat(
-            (*all_observations, *all_actions),
-            dim=1)
+        input = torch.cat((*all_observations, *all_actions), dim=1)
         values = cur_agent.critic(input)
 
         # calculate loss
@@ -222,8 +223,7 @@ class MADDPG:
 
         cur_agent.actor_optimizer.zero_grad()
 
-        logits = self.agents[cur_agent_id].actor(torch.tensor(
-            observations[cur_agent_id], dtype=torch.float, device=self.device))
+        logits = self.agents[cur_agent_id].actor(observations[cur_agent_id])
         cur_agent_action = gumbel_softmax(logits, device=self.device)
 
         cur_agent_actions = []

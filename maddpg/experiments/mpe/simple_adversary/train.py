@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
                     actions = maddpg.take_action(env, state, explore=True)
                     step_actions = {
-                        agent_id: action.argmax()
+                        agent_id: action.argmax(dim=-1).item()
                         for agent_id, action in actions.items()
                     }
                     next_state, reward, terminated, truncated, _ = env.step(
