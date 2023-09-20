@@ -1,5 +1,6 @@
 import os
 import glob
+import math
 import random
 from collections import namedtuple, deque
 
@@ -51,22 +52,15 @@ class ReplayBuffer:
 
         return agent_states, agent_actions, agent_rewards, agent_next_states, agent_dones
 
-    def __to_tensor(self, x):
-        if isinstance(x, float) or isinstance(x, int) or isinstance(x, bool):
-            return torch.tensor([x], dtype=torch.float, requires_grad=False).to(device=self.device)
-        return torch.tensor(x, dtype=torch.float, requires_grad=False).to(device=self.device)
-
-    def __to_array(self, tuples, agents, batch_size):
-        tuple_array = np.array(tuples)
-        agent_array = {
-            agent_id: torch.stack(
-                [self.__to_tensor(tuple_array[i][agent_id])
-                 for i in range(len(tuple_array))],
-                dim=1
-            ).view(batch_size, -1)
+    def __to_array(self, batch, agents, batch_size):
+        batch_array = np.array(batch)
+        agent_batch_array = {
+            agent_id: np.array(
+                [batch_array[i][agent_id] for i in range(batch_size)]
+            )
             for agent_id in agents
         }
-        return agent_array
+        return agent_batch_array
 
     def size(self):
         return len(self.buffer)
@@ -77,7 +71,8 @@ class Agent:
     def __init__(self,
                  state_dim, action_dim,
                  critic_input_dim, hidden_dim,
-                 actor_lr=1e-3, critic_lr=1e-3, device='cpu'):
+                 actor_lr=1e-4, critic_lr=1e-3, device='cpu',
+                 eps_start=0.9, eps_end=0.01, eps_decay=10000):
         self.actor = Net(state_dim, action_dim, hidden_dim).to(device)
         self.target_actor = Net(state_dim, action_dim,
                                 hidden_dim).to(device)
@@ -95,14 +90,22 @@ class Agent:
                                            lr=critic_lr)
 
         self.device = device
+        self.eps_steps = 0
+        self.eps_start = eps_start
+        self.eps_decay = eps_decay
+        self.eps_end = eps_end
 
     def select_action(self, state, explore=False):
-        action = self.actor(state).detach()
+        action = self.actor(state)
         if explore:
-            action = gumbel_softmax(action, device=self.device)
+            eps_threshold = self.eps_end + \
+                (self.eps_start - self.eps_end) * \
+                math.exp(-1. * self.eps_steps / self.eps_decay)
+            self.eps_steps += 1
+            action = gumbel_softmax(action, eps=eps_threshold)
         else:
             action = onehot_from_logits(action, device=self.device)
-        return action
+        return action.detach().cpu().numpy()[0]
 
     def soft_update(self, tau):
         self.__sort_update(self.actor, self.target_actor, tau)
@@ -122,13 +125,26 @@ class MADDPG:
                  critic_lr=1e-2,
                  hidden_dim=64,
                  gamma=0.95,
-                 tau=1e-2):
+                 tau=1e-2,
+                 eps_start=0.9,
+                 eps_end=0.01,
+                 eps_decay=10000):
         critic_input_dim = sum(state_dims.values()) + sum(action_dims.values())
 
         self.agents = dict()
         for agent_id in env.agents:
-            self.agents[agent_id] = Agent(state_dims[agent_id], action_dims[agent_id], critic_input_dim,
-                                          hidden_dim, actor_lr, critic_lr, device)
+            self.agents[agent_id] = Agent(
+                state_dims[agent_id],
+                action_dims[agent_id],
+                critic_input_dim,
+                hidden_dim=hidden_dim,
+                actor_lr=actor_lr,
+                critic_lr=critic_lr,
+                device=device,
+                eps_start=eps_start,
+                eps_end=eps_end,
+                eps_decay=eps_decay)
+
         self.gamma = gamma
         self.tau = tau
         self.device = device
@@ -149,23 +165,17 @@ class MADDPG:
             agent_id: agent.target_actor for agent_id, agent in self.agents.items()
         }
 
-    def __flatten_as_need(self, t):
-        if t.dim() > 1:
-            return t.flatten()
-        return t
-
     def take_action(self, env, states, explore=False):
         observations = {
-            agent_id: torch.stack(
-                [self.__flatten_as_need(torch.tensor(
-                    states[agent_id], dtype=torch.float, device=self.device))]
-            )
+            agent_id: [states[agent_id]]
             for agent_id in env.agents
         }
 
         return {
             agent_id: agent.select_action(
-                observations[agent_id], explore=explore)
+                torch.tensor(
+                    observations[agent_id], dtype=torch.float).to(device=self.device),
+                explore=explore)
             for agent_id, agent in self.agents.items()
         }
 
@@ -188,24 +198,40 @@ class MADDPG:
         # calculate target values
         all_target_actions = [
             onehot_from_logits(target_act(
-                next_observations[agent_id]), device=self.device)
+                torch.tensor(
+                    next_observations[agent_id], dtype=torch.float, device=self.device
+                )), device=self.device)
             for agent_id, target_act in self.target_actors.items()
         ]
         all_target_observations = [
-            next_observations[agent_id] for agent_id in self.agents
+            torch.tensor(
+                next_observations[agent_id], device=self.device
+            )
+            for agent_id in self.agents
         ]
         target_input = torch.cat(
             (*all_target_observations, *all_target_actions), dim=1)
-        target_values = rewards[agent_id].view(-1, 1) + self.gamma * \
+
+        cur_agent_rewards = torch.tensor(
+            rewards[agent_id], dtype=torch.float, device=self.device).view(-1, 1)
+        cur_agent_dones = torch.tensor(
+            dones[agent_id], dtype=torch.float, device=self.device).float().view(-1, 1)
+        target_values = cur_agent_rewards + self.gamma * \
             cur_agent.target_critic(target_input) * \
-            (1 - dones[agent_id].view(-1, 1))
+            (1 - cur_agent_dones.view(-1, 1))
 
         # calculate values
         all_observations = [
-            observations[agent_id] for agent_id in self.agents
+            torch.tensor(
+                observations[agent_id], device=self.device, dtype=torch.float,
+            )
+            for agent_id in self.agents
         ]
         all_actions = [
-            actions[agent_id] for agent_id in self.agents
+            torch.tensor(
+                actions[agent_id], device=self.device, dtype=torch.float
+            )
+            for agent_id in self.agents
         ]
         input = torch.cat((*all_observations, *all_actions), dim=1)
         values = cur_agent.critic(input)
@@ -223,8 +249,10 @@ class MADDPG:
 
         cur_agent.actor_optimizer.zero_grad()
 
-        logits = self.agents[cur_agent_id].actor(observations[cur_agent_id])
-        cur_agent_action = gumbel_softmax(logits, device=self.device)
+        logits = self.agents[cur_agent_id].actor(
+            torch.tensor(observations[cur_agent_id], device=self.device)
+        )
+        cur_agent_action = gumbel_softmax(logits)
 
         cur_agent_actions = []
         for agent_id in self.agents:
@@ -232,11 +260,12 @@ class MADDPG:
                 cur_agent_actions.append(cur_agent_action)
             else:
                 cur_agent_actions.append(
-                    onehot_from_logits(self.agents[agent_id].actor(observations[agent_id]),
-                                       device=self.device))
+                    onehot_from_logits(self.agents[agent_id].actor(
+                        torch.tensor(observations[agent_id], device=self.device)),
+                        device=self.device))
 
         cur_agent_observations = [
-            observations[agent_id]
+            torch.tensor(observations[agent_id], device=self.device)
             for agent_id in self.agents
         ]
         critic_input = torch.cat(

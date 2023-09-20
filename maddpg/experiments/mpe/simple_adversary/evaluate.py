@@ -8,10 +8,10 @@ from maddpg.model import MADDPG
 
 if __name__ == "__main__":
     times = 10000
-    hidden_dim = 64
+    hidden_dim = 128
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = simple_adversary_v3.parallel_env(max_cycles=25, render_mode='human')
+    env = simple_adversary_v3.parallel_env(max_cycles=200, render_mode='human')
     state, info = env.reset()
 
     agents = [agent_id for agent_id in env.agents]
@@ -23,7 +23,7 @@ if __name__ == "__main__":
         action_dims[agent_id] = env.action_space(agent_id).n
         state_dims[agent_id] = math.prod(env.observation_space(agent_id).shape)
 
-    maddpg = MADDPG(env, device, state_dims, action_dims)
+    maddpg = MADDPG(env, device, state_dims, action_dims, hidden_dim=hidden_dim)
     maddpg.load()
 
     for i in range(times):
@@ -34,7 +34,7 @@ if __name__ == "__main__":
         
             actions = maddpg.take_action(env, state)
             step_actions = {
-                agent_id: action.argmax(dim=1).item()
+                agent_id: action.argmax()
                 for agent_id, action in actions.items()
             }
             state, rewards, terminations, truncations, infos = env.step(step_actions)
@@ -44,6 +44,6 @@ if __name__ == "__main__":
             if all(terminations.values()) or all(truncations.values()):
                 break
             
-            time.sleep(1)
+            time.sleep(0.5)
 
     env.close()

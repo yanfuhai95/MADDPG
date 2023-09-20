@@ -64,18 +64,20 @@ if __name__ == "__main__":
     num_episodes = 5000
     episode_length = 25
     buffer_size = 100000
-    hidden_dim = 64
-    actor_lr = 1e-2
+    hidden_dim = 128
+    actor_lr = 1e-3
     critic_lr = 1e-2
-    gamma = 0.95
+    gamma = 0.9
     tau = 1e-2
     batch_size = 1024
-    # batch_size = 5
-    # minimal_size = 10
     minimal_size = 4000
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     update_interval = 100
+    eps_start = 0.9
+    eps_end = 0.01
+    eps_decay = 10000
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     env = simple_adversary_v3.parallel_env(max_cycles=episode_length+1)
     observations, info = env.reset()
 
@@ -95,6 +97,9 @@ if __name__ == "__main__":
                     critic_lr=critic_lr,
                     hidden_dim=hidden_dim,
                     gamma=gamma,
+                    eps_start=eps_start,
+                    eps_end=eps_end,
+                    eps_decay=eps_decay,
                     tau=tau)
 
     total_steps = 0
@@ -103,33 +108,26 @@ if __name__ == "__main__":
         with tqdm(total=int(num_episodes / 50), desc='Iteration %d' % i) as pbar:
             for i_episode in range(int(num_episodes / 50)):
                 state, info = env.reset()
-
                 agent_rewards = dict()
                 for i_step in range(episode_length):
                     if not env.agents:
                         break
 
                     actions = maddpg.take_action(env, state, explore=True)
-                    step_actions = {
-                        agent_id: action.argmax(dim=-1).item()
-                        for agent_id, action in actions.items()
-                    }
-                    next_state, reward, terminated, truncated, _ = env.step(
-                        step_actions)
+                    next_state, reward, terminated, truncated, _ = env.step({
+                        agent_id: action.argmax() for agent_id, action in actions.items()
+                    })
 
                     for agent_id, reward_ in reward.items():
                         if agent_id not in agent_rewards:
                             agent_rewards[agent_id] = []
                         agent_rewards[agent_id].append(reward_)
 
-                    if env.agents:
-                        done = {
-                            agent_id: True if agent_id not in terminated and agent_id not in truncated
-                            else terminated[agent_id] or truncated[agent_id]
-                            for agent_id in agents
-                        }
-                    else:
-                        done = {agent_id: True for agent_id in agents}
+                    done = {
+                        agent_id: True if agent_id not in terminated and agent_id not in truncated
+                        else terminated[agent_id] or truncated[agent_id]
+                        for agent_id in agents
+                    }
 
                     replay_buffer.add(Transition(
                         state, actions, reward, next_state, done))
